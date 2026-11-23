@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meteor Dodge</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #050510; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<script>
+(function () {
+  'use strict';
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width;
+  var H = canvas.height;
+
+  var SHIP_Y = H - 90;
+  var SHIP_SPEED = 9;
+  var SHIP_R = 16;
+
+  var score = 0;
+  var best = 0;
+  var over = false;
+  var shipX = W / 2;
+  var pointerX = null; // target x from pointer; null until the pointer moves
+  var keys = {};
+  var shake = 0;
+  var elapsed = 0;
+  var lastSpawn = 0;
+  var meteors = [];
+  var particles = [];
+  var stars = [];
+  var raf = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  for (var i = 0; i < 140; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: rand(0.5, 2.0),
+      speed: rand(0.2, 0.9),
+      phase: Math.random() * Math.PI * 2,
+      tw: rand(0.5, 2.0)
+    });
+  }
+
+  function spawnMeteor() {
+    var r = rand(14, 40);
+    var t = elapsed / 1000; // seconds survived
+    var speed = rand(2, 4.2) + Math.min(t * 0.05, 3);
+    var x = rand(r, W - r);
+    // Fairness: early on, don't drop a meteor right on the ship's head.
+    if (t < 20) {
+      for (var tries = 0; tries < 3 && Math.abs(x - shipX) < 70; tries++) {
+        x = rand(r, W - r);
+      }
+    }
+    meteors.push({
+      x: x,
+      y: -r,
+      r: r,
+      vy: speed,
+      vx: rand(-0.7, 0.7),
+      rot: Math.random() * Math.PI * 2,
+      vr: rand(-0.02, 0.02),
+      seed: Math.random() * Math.PI * 2
+    });
+  }
+
+  function spawnInterval() {
+    var t = elapsed / 1000;
+    return Math.max(300, 1000 - t * 12); // ms between spawns, ramps down
+  }
+
+  function explode(x, y) {
+    for (var i = 0; i < 42; i++) {
+      var a = Math.random() * Math.PI * 2;
+      var sp = rand(1, 7);
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life: rand(25, 60),
+        max: 60,
+        r: rand(2, 6),
+        hue: Math.random() < 0.6 ? '#ff9a2a' : '#ff5722'
+      });
+    }
+  }
+
+  function reset() {
+    score = 0;
+    over = false;
+    meteors = [];
+    particles = [];
+    shipX = W / 2;
+    pointerX = null;
+    elapsed = 0;
+    lastSpawn = 0;
+    shake = 0;
+  }
+
+  function update(dt) {
+    elapsed += dt;
+    if (!over) {
+      if (keys['ArrowLeft'] || keys['a'] || keys['A']) {
+        shipX -= SHIP_SPEED;
+        pointerX = null; // keys take over from the pointer
+      }
+      if (keys['ArrowRight'] || keys['d'] || keys['D']) {
+        shipX += SHIP_SPEED;
+        pointerX = null;
+      }
+      // Pointer-follow glides toward the pointer instead of teleporting,
+      // so the ship never snaps across the screen on a stray mouse move.
+      if (pointerX !== null) {
+        var dx = pointerX - shipX;
+        var step = Math.max(-14, Math.min(14, dx));
+        shipX += step;
+      }
+      shipX = Math.max(24, Math.min(W - 24, shipX));
+
+      lastSpawn += dt;
+      if (lastSpawn >= spawnInterval()) {
+        lastSpawn = 0;
+        spawnMeteor();
+      }
+
+      for (var i = meteors.length - 1; i >= 0; i--) {
+        var m = meteors[i];
+        m.y += m.vy;
+        m.x += m.vx;
+        m.rot += m.vr;
+        if (m.x < m.r) { m.x = m.r; m.vx = Math.abs(m.vx); }
+        if (m.x > W - m.r) { m.x = W - m.r; m.vx = -Math.abs(m.vx); }
+        if (m.y - m.r > H) {
+          meteors.splice(i, 1);
+          score += 1;
+          continue;
+        }
+        var dx = m.x - shipX;
+        var dy = m.y - SHIP_Y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < m.r + SHIP_R) {
+          over = true;
+          if (score > best) best = score;
+          explode(shipX, SHIP_Y);
+          shake = 14;
+          break;
+        }
+      }
+    }
+
+    for (var p = particles.length - 1; p >= 0; p--) {
+      var pt = particles[p];
+      pt.x += pt.vx;
+      pt.y += pt.vy;
+      pt.vx *= 0.97;
+      pt.vy *= 0.97;
+      pt.life -= 1;
+      if (pt.life <= 0) particles.splice(p, 1);
+    }
+
+    for (var s = 0; s < stars.length; s++) {
+      var st = stars[s];
+      st.y += st.speed;
+      if (st.y > H) { st.y = -2; st.x = Math.random() * W; }
+    }
+
+    if (shake > 0) shake *= 0.88;
+  }
+
+  function drawShip(x, y, t) {
+    // exhaust flame (flickers)
+    var fl = 12 + Math.sin(t / 55) * 5 + Math.random() * 3;
+    ctx.beginPath();
+    ctx.moveTo(x - 7, y + 14);
+    ctx.lineTo(x, y + 14 + fl);
+    ctx.lineTo(x + 7, y + 14);
+    ctx.closePath();
+    ctx.fillStyle = '#ff8c1a';
+    ctx.fill();
+
+    // dart / triangle hull
+    ctx.beginPath();
+    ctx.moveTo(x, y - 22);
+    ctx.lineTo(x + 18, y + 16);
+    ctx.lineTo(x + 6, y + 10);
+    ctx.lineTo(x, y + 14);
+    ctx.lineTo(x - 6, y + 10);
+    ctx.lineTo(x - 18, y + 16);
+    ctx.closePath();
+    ctx.fillStyle = '#2f7bff';
+    ctx.fill();
+    ctx.strokeStyle = '#9ec2ff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // cockpit dot
+    ctx.beginPath();
+    ctx.arc(x, y - 4, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#cfe6ff';
+    ctx.fill();
+  }
+
+  function drawMeteor(m) {
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.rotate(m.rot);
+    ctx.beginPath();
+    var bumps = 9;
+    for (var i = 0; i <= bumps; i++) {
+      var a = (i / bumps) * Math.PI * 2;
+      var rr = m.r * (0.82 + 0.18 * Math.sin(m.seed + i * 2.7));
+      var px = Math.cos(a) * rr;
+      var py = Math.sin(a) * rr;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#8d6e63';
+    ctx.fill();
+    ctx.strokeStyle = '#5d4037';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // craters
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath();
+    ctx.arc(-m.r * 0.3, -m.r * 0.2, m.r * 0.22, 0, Math.PI * 2);
+    ctx.arc(m.r * 0.35, m.r * 0.3, m.r * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw(now) {
+    ctx.save();
+    if (shake > 0.4) {
+      ctx.translate(rand(-shake, shake), rand(-shake, shake));
+    }
+
+    // background
+    ctx.fillStyle = '#050510';
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+
+    // starfield (twinkling)
+    for (var i = 0; i < stars.length; i++) {
+      var st = stars[i];
+      var tw = 0.45 + 0.55 * Math.abs(Math.sin(now / 700 * st.tw + st.phase));
+      ctx.globalAlpha = tw;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // meteors
+    for (var j = 0; j < meteors.length; j++) drawMeteor(meteors[j]);
+
+    // explosion particles
+    for (var p = 0; p < particles.length; p++) {
+      var pt = particles[p];
+      ctx.globalAlpha = Math.max(0, pt.life / pt.max);
+      ctx.fillStyle = pt.hue;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // ship
+    if (!over) drawShip(shipX, SHIP_Y, now);
+
+    // HUD
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('SCORE ' + score, 18, 16);
+    ctx.font = '15px system-ui, sans-serif';
+    ctx.fillStyle = '#9aa3c0';
+    ctx.fillText('arrow keys move, dodge the meteors', 18, 50);
+    ctx.fillStyle = '#ffd54a';
+    ctx.font = 'bold 24px system-ui, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('METEOR DODGE', W - 18, 16);
+
+    // game over overlay
+    if (over) {
+      ctx.fillStyle = 'rgba(3, 3, 12, 0.62)';
+      ctx.fillRect(-20, -20, W + 40, H + 40);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff4d4d';
+      ctx.font = 'bold 64px system-ui, sans-serif';
+      ctx.fillText('GAME OVER', W / 2, H / 2 - 90);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 30px system-ui, sans-serif';
+      ctx.fillText('SCORE ' + score + '   ·   BEST ' + best, W / 2, H / 2 - 8);
+      ctx.fillStyle = '#ffd54a';
+      ctx.font = '22px system-ui, sans-serif';
+      ctx.fillText('press SPACE to play again', W / 2, H / 2 + 46);
+    }
+
+    ctx.restore();
+  }
+
+  var last = 0;
+  function frame(now) {
+    var dt = last ? now - last : 16;
+    if (dt > 50) dt = 50;
+    last = now;
+    update(dt);
+    draw(now);
+    raf = requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('keydown', function (e) {
+    keys[e.key] = true;
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      if (over) reset();
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === ' ') {
+      e.preventDefault();
+    }
+  });
+  window.addEventListener('keyup', function (e) {
+    keys[e.key] = false;
+  });
+  canvas.addEventListener('pointermove', function (e) {
+    var rect = canvas.getBoundingClientRect();
+    var scale = W / rect.width;
+    pointerX = Math.max(24, Math.min(W - 24, (e.clientX - rect.left) * scale));
+  });
+
+  // Read-only test hook.
+  Object.defineProperty(window, 'GAME', {
+    value: {
+      get score() { return score; },
+      get over() { return over; },
+      get meteors() { return meteors.length; },
+      get shipX() { return shipX; },
+      nearest: function () {
+        var low = null;
+        for (var i = 0; i < meteors.length; i++) {
+          if (!low || meteors[i].y > low.y) low = meteors[i];
+        }
+        return low ? { x: low.x, y: low.y, r: low.r } : null;
+      }
+    },
+    writable: false,
+    configurable: false
+  });
+
+  raf = requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
